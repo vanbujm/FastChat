@@ -8,6 +8,7 @@ import json
 import os
 import random
 import time
+from xml.sax.handler import property_interning_dict
 
 import shortuuid
 import torch
@@ -17,25 +18,36 @@ from fastchat.llm_judge.common import load_questions, temperature_config
 from fastchat.model import load_model, get_conversation_template
 from fastchat.utils import str_to_torch_dtype
 
+import json
+
+exisiting_answers = []
+
 
 def run_eval(
-    model_path,
-    model_id,
-    question_file,
-    question_begin,
-    question_end,
-    answer_file,
-    max_new_token,
-    num_choices,
-    num_gpus_per_model,
-    num_gpus_total,
-    max_gpu_memory,
-    dtype,
-    revision,
+        model_path,
+        model_id,
+        question_file,
+        question_begin,
+        question_end,
+        answer_file,
+        max_new_token,
+        num_choices,
+        num_gpus_per_model,
+        num_gpus_total,
+        max_gpu_memory,
+        dtype,
+        revision,
 ):
     questions = load_questions(question_file, question_begin, question_end)
+
+    print("Loaded questions: ")
+    print(len(questions))
+    filtered_questions = [q for q in questions if not q["question_id"] in exisiting_answers]
+    print("Filtered questions: ")
+    print(len(filtered_questions))
+
     # random shuffle the questions to balance the loading
-    random.shuffle(questions)
+    random.shuffle(filtered_questions)
 
     # Split the question file into `num_gpus` files
     assert num_gpus_total % num_gpus_per_model == 0
@@ -48,14 +60,14 @@ def run_eval(
     else:
         get_answers_func = get_model_answers
 
-    chunk_size = len(questions) // (num_gpus_total // num_gpus_per_model)
+    chunk_size = len(filtered_questions) // (num_gpus_total // num_gpus_per_model)
     ans_handles = []
-    for i in range(0, len(questions), chunk_size):
+    for i in range(0, len(filtered_questions), chunk_size):
         ans_handles.append(
             get_answers_func(
                 model_path,
                 model_id,
-                questions[i : i + chunk_size],
+                filtered_questions[i: i + chunk_size],
                 answer_file,
                 max_new_token,
                 num_choices,
@@ -72,16 +84,16 @@ def run_eval(
 
 @torch.inference_mode()
 def get_model_answers(
-    model_path,
-    model_id,
-    questions,
-    answer_file,
-    max_new_token,
-    num_choices,
-    num_gpus_per_model,
-    max_gpu_memory,
-    dtype,
-    revision,
+        model_path,
+        model_id,
+        questions,
+        answer_file,
+        max_new_token,
+        num_choices,
+        num_gpus_per_model,
+        max_gpu_memory,
+        dtype,
+        revision,
 ):
     model, tokenizer = load_model(
         model_path,
@@ -129,7 +141,7 @@ def get_model_answers(
                     if model.config.is_encoder_decoder:
                         output_ids = output_ids[0]
                     else:
-                        output_ids = output_ids[0][len(input_ids[0]) :]
+                        output_ids = output_ids[0][len(input_ids[0]):]
 
                     # be consistent with the template's stop_token_ids
                     if conv.stop_token_ids:
@@ -284,6 +296,15 @@ if __name__ == "__main__":
         answer_file = f"data/{args.bench_name}/model_answer/{args.model_id}.jsonl"
 
     print(f"Output to {answer_file}")
+
+    try:
+        with open(answer_file) as f:
+            for line in f:
+                exisiting_answers.append(json.loads(line)["question_id"])
+    except:
+        pass
+    print("Existing answers: ")
+    print(len(exisiting_answers))
 
     run_eval(
         model_path=args.model_path,
